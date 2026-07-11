@@ -441,7 +441,7 @@ fn path_is_on_nfs(path: &Path) -> bool {
 
 #[cfg(target_os = "linux")]
 fn is_nfs_statfs(buf: &libc::statfs) -> bool {
-    buf.f_type == libc::NFS_SUPER_MAGIC
+    buf.f_type as u64 == libc::NFS_SUPER_MAGIC as u64
 }
 
 #[cfg(target_os = "macos")]
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn is_nfs_statfs_detects_nfs_magic() {
         let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
-        buf.f_type = libc::NFS_SUPER_MAGIC;
+        buf.f_type = libc::NFS_SUPER_MAGIC as _;
         assert!(super::is_nfs_statfs(&buf));
     }
 
