@@ -87,7 +87,7 @@ jobs:
       - if: steps.existing.outputs.skip != 'true'
         name: Test state crate
         working-directory: codex-rs
-        run: cargo nextest run --quiet --no-fail-fast -p codex-state
+        run: cargo nextest run --no-fail-fast -p codex-state
       - if: steps.existing.outputs.skip != 'true'
         name: Use hermetic Cargo home
         shell: bash
@@ -189,6 +189,11 @@ jobs:
           set -euo pipefail
           tag="${UPSTREAM_TAG:-unknown-release}"
           title="NFS build failed for ${tag}"
+          if [[ "$(gh repo view "$GITHUB_REPOSITORY" --json hasIssuesEnabled --jq .hasIssuesEnabled)" != "true" ]]; then
+            echo "## ${title}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq 'length')"
           if [[ "$existing" == "0" ]]; then
             gh issue create \
