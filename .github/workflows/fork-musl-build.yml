@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - state/sqlite-truncate-journal-on-nfs
+      - release/v0.144.1-nfs-sqlite-truncate
 
 permissions:
   contents: read
