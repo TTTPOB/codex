@@ -1,0 +1,198 @@
+name: nfs-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Upstream Codex release tag, or blank for latest
+        required: false
+        type: string
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: nfs-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Patch and build latest release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      upstream_tag: ${{ steps.release.outputs.upstream_tag }}
+    env:
+      PATCH_TAG: nfs-sqlite-truncate-v1
+      TARGET: x86_64-unknown-linux-musl
+      CARGO_INCREMENTAL: "0"
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Resolve upstream release
+        id: release
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          upstream_tag="$REQUESTED_TAG"
+          if [[ -z "$upstream_tag" ]]; then
+            upstream_tag="$(gh api repos/openai/codex/releases/latest --jq .tag_name)"
+          fi
+          if [[ ! "$upstream_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "Unexpected upstream tag: $upstream_tag" >&2
+            exit 1
+          fi
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "UPSTREAM_TAG=$upstream_tag" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=nfs-$upstream_tag" >> "$GITHUB_ENV"
+      - name: Check existing release asset
+        id: existing
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_name="codex-${RELEASE_TAG}-x86_64-unknown-linux-musl.tar.gz"
+          found="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq ".assets[]? | select(.name == \"$asset_name\") | .name" 2>/dev/null || true)"
+          if [[ "$found" == "$asset_name" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Release asset already exists: $asset_name"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Apply NFS patch
+        if: steps.existing.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --depth=1 https://github.com/openai/codex.git "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+          git fetch --force --depth=2 origin "refs/tags/${PATCH_TAG}:refs/tags/${PATCH_TAG}"
+          git switch --detach "$UPSTREAM_TAG"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git cherry-pick "${PATCH_TAG}^{commit}"
+      - if: steps.existing.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-unknown-linux-musl
+      - if: steps.existing.outputs.skip != 'true'
+        name: Install nextest
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+      - if: steps.existing.outputs.skip != 'true'
+        name: Test state crate
+        working-directory: codex-rs
+        run: cargo nextest run --quiet --no-fail-fast -p codex-state
+      - if: steps.existing.outputs.skip != 'true'
+        name: Use hermetic Cargo home
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+      - if: steps.existing.outputs.skip != 'true'
+        name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+      - if: steps.existing.outputs.skip != 'true'
+        name: Install musl build tools
+        working-directory: codex-rs
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+      - if: steps.existing.outputs.skip != 'true'
+        name: Configure musl environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY_x86_64_unknown_linux_musl=1" >> "$GITHUB_ENV"
+      - if: steps.existing.outputs.skip != 'true'
+        name: Configure rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-musl
+      - if: steps.existing.outputs.skip != 'true'
+        name: Build musl binaries
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --quiet --target "$TARGET" --release --bin bwrap
+          bwrap_path="target/${TARGET}/release/bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap_path"
+          digest="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          export CODEX_BWRAP_SHA256="$digest"
+          cargo build --quiet --target "$TARGET" --release --bin codex
+      - if: steps.existing.outputs.skip != 'true'
+        name: Package binaries
+        id: package
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/codex-${RELEASE_TAG}-x86_64-unknown-linux-musl.tar.gz"
+          tar -C "target/${TARGET}/release" -czf "$archive" codex bwrap
+          sha256sum "$archive" > "${archive}.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+      - if: steps.existing.outputs.skip != 'true'
+        name: Upload Actions artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-nfs-x86_64-unknown-linux-musl
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          retention-days: 14
+          if-no-files-found: error
+      - if: steps.existing.outputs.skip != 'true'
+        name: Publish fork release
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          set -euo pipefail
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            git tag -a "$RELEASE_TAG" -m "Codex ${UPSTREAM_TAG} with SQLite NFS fix"
+            git push origin "refs/tags/${RELEASE_TAG}"
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$ARCHIVE" "${ARCHIVE}.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "$ARCHIVE" "${ARCHIVE}.sha256" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "Codex ${UPSTREAM_TAG} with SQLite NFS fix" \
+              --notes "Based on openai/codex ${UPSTREAM_TAG}. Uses SQLite TRUNCATE journal mode on NFS and WAL on local filesystems."
+          fi
+
+  report-failure:
+    name: Report automation failure
+    needs: build
+    if: ${{ always() && needs.build.result == 'failure' }}
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
+    steps:
+      - name: Create failure issue
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${UPSTREAM_TAG:-unknown-release}"
+          title="NFS build failed for ${tag}"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq 'length')"
+          if [[ "$existing" == "0" ]]; then
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --body "The automated NFS patch or musl build failed for ${tag}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          fi
