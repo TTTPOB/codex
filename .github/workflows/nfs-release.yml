@@ -173,7 +173,8 @@ jobs:
         run: |
           set -euo pipefail
           if ! git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
-            git tag -a "$RELEASE_TAG" -m "Codex ${UPSTREAM_TAG} with SQLite NFS fix"
+            # GITHUB_TOKEN cannot push the patched upstream commit when it adds workflow files.
+            git tag -a "$RELEASE_TAG" "$GITHUB_SHA" -m "Codex ${UPSTREAM_TAG} with SQLite NFS fix"
             git push origin "refs/tags/${RELEASE_TAG}"
           fi
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
