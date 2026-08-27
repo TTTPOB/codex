@@ -4621,6 +4621,7 @@ dependencies = [
  "codex-protocol",
  "codex-utils-absolute-path",
  "file-id",
+ "libc",
  "libsqlite3-sys",
  "log",
  "pretty_assertions",
