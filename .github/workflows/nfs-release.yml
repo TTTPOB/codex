@@ -26,7 +26,7 @@ jobs:
     outputs:
       upstream_tag: ${{ steps.release.outputs.upstream_tag }}
     env:
-      PATCH_TAG: nfs-sqlite-truncate-v3
+      PATCH_TAG: nfs-sqlite-truncate-v4
       TARGET: x86_64-unknown-linux-musl
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
