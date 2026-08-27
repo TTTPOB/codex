@@ -18,6 +18,7 @@ use sqlx::Error;
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqliteJournalMode;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::sqlite::SqliteSynchronous;
 use std::path::Path;
@@ -308,6 +309,11 @@ impl SqliteConfig {
 
     /// Open a writable Codex SQLite database, creating it if necessary.
     pub async fn open_read_write_pool(&self, path: &Path) -> Result<SqlitePool, Error> {
+        let journal_pragma = if journal_mode_for_path(path) == SqliteJournalMode::Truncate {
+            "PRAGMA journal_mode = TRUNCATE"
+        } else {
+            "PRAGMA journal_mode = WAL"
+        };
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -342,9 +348,7 @@ impl SqliteConfig {
                                 .execute(&mut *connection)
                                 .await?;
                         }
-                        sqlx::query("PRAGMA journal_mode = WAL")
-                            .execute(connection)
-                            .await?;
+                        sqlx::query(journal_pragma).execute(connection).await?;
                         Ok(())
                     }
                     .await;
@@ -383,6 +387,60 @@ impl SqliteConfig {
             .connect_with(options)
             .await
     }
+}
+
+/// Choose a rollback journal on NFS because SQLite WAL relies on coherent mmap.
+fn journal_mode_for_path(path: &Path) -> SqliteJournalMode {
+    let on_nfs = path_is_on_nfs(path);
+    if on_nfs {
+        log::warn!(
+            "SQLite database on NFS detected at {}; using TRUNCATE journal mode (WAL is unsafe on network filesystems)",
+            path.display()
+        );
+    }
+    pick_journal_mode(on_nfs)
+}
+
+fn pick_journal_mode(is_nfs: bool) -> SqliteJournalMode {
+    if is_nfs {
+        SqliteJournalMode::Truncate
+    } else {
+        SqliteJournalMode::Wal
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn path_is_on_nfs(path: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    // The database may not exist yet, so inspect its existing parent directory.
+    let target = path.parent().unwrap_or_else(|| Path::new("."));
+    let Ok(c_path) = CString::new(target.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // SAFETY: statfs initializes the provided buffer from the valid C path.
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut buf) } != 0 {
+        return true;
+    }
+    is_nfs_statfs(&buf)
+}
+
+#[cfg(target_os = "linux")]
+fn is_nfs_statfs(buf: &libc::statfs) -> bool {
+    buf.f_type as u64 == libc::NFS_SUPER_MAGIC as u64
+}
+
+#[cfg(target_os = "macos")]
+fn is_nfs_statfs(buf: &libc::statfs) -> bool {
+    buf.f_fstypename
+        .starts_with(&[b'n' as _, b'f' as _, b's' as _, 0])
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn path_is_on_nfs(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(test)]
