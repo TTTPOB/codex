@@ -1,22 +1,31 @@
 # Personal fork: daily-driver integration and releases
 
-- `TTTPOB/codex` uses `daily-driver` as the installed, integrated source branch and the fork's default branch. Feature/fix branches own their changes; integrate reviewed commits with `git cherry-pick -x`. Do not merge entire feature branches into daily-driver.
-- Maintain one personal release workflow: `.github/workflows/daily-driver-release.yml` on `daily-driver`. Do not copy or maintain personal release CI on every feature branch. Upstream workflows are not the personal release entry point.
-- Build the checked-out integrated commit directly. Never fetch the latest upstream release or apply a patch tag inside release CI. The release tag must point to the same commit used to build the binaries.
-- Upgrade upstream deliberately: fetch the selected `rust-vX.Y.Z` tag, adapt fixes on feature branches based on that tag, then integrate the upstream version into daily-driver and cherry-pick the adapted fixes. Resolve conflicts before publishing; do not reset or force-push the shared daily-driver branch or lose its existing integrations/workflow.
-- For the initial v0.160.1 integration, the NFS source branch is `fix/nfs-v0.160.1`. Preserve upstream SQLite initialization/locking behavior; use TRUNCATE on NFS and WAL on local filesystems, including musl builds.
-- Do not compile Rust locally, including `cargo build`, `just test`, or `just fix`, unless the user explicitly requests local compilation. Run focused tests and the Linux musl build in the central GitHub Actions workflow; local checks should be limited to non-compiling formatting/static checks. This personal-fork rule takes precedence over the upstream local-testing instructions below. Do not duplicate full build matrices or add hypothetical safety machinery.
-- After work, remove task-generated local build artifacts (`codex-rs/target` and this checkout's Bazel build cache) and temporary files. Do not delete shared dependency download caches, unrelated project caches, or deliverables. Do not wait for the long cloud release build unless the user asks; provide the run URL and its current status.
-- Commit workflow/process changes separately from feature fixes. Push the feature branch and daily-driver, then explicitly dispatch the central release workflow from daily-driver:
+## Branches and integration
+
+- `TTTPOB/codex` uses `daily-driver` as its default branch and the source for installed releases.
+- Develop feature and fix commits on dedicated branches, then integrate them with `git cherry-pick -x`. Commit workflow/process changes separately and integrate them the same way.
+- Upgrade upstream deliberately: fetch the selected `rust-vX.Y.Z` tag, adapt fixes on feature branches, integrate the upstream version into daily-driver, and cherry-pick the adapted fixes. Resolve conflicts before publishing and preserve existing integrations and the central workflow. Do not reset or force-push the shared daily-driver branch.
+- SQLite must use TRUNCATE on NFS and WAL on local filesystems, including musl builds. Preserve upstream initialization and locking behavior.
+
+## Local validation and cleanup
+
+- Local `codex-state` tests are allowed: run `just test -p codex-state` from `codex-rs` when changing that crate. Local formatting and static checks are also allowed.
+- Build the complete Codex release, including Linux musl binaries, in GitHub Actions. Do not run full Codex builds or workspace-wide tests locally unless the user explicitly requests them. This scope overrides the broader upstream testing instructions below.
+- After work, remove task-generated local build artifacts (`codex-rs/target` and this checkout's Bazel build cache, if used) and temporary files. Preserve shared dependency download caches, unrelated project caches, and deliverables.
+
+## Releases
+
+- Maintain one personal release workflow: `.github/workflows/daily-driver-release.yml` on `daily-driver`. It tests and builds the checked-out integrated source directly; the published tag must identify the built commit. Feature branches do not maintain separate personal release workflows.
+- Push the source branches and daily-driver, then explicitly dispatch:
 
   ```bash
   gh workflow run daily-driver-release.yml -R TTTPOB/codex --ref daily-driver \
     -f tag=daily-driver-vX.Y.Z-N
   ```
 
-- Replace `X.Y.Z` with the integrated upstream version and `N` with a new release revision. Published releases are immutable: use a new revision for changed source, not asset clobbering. Merely pushing branches or tags does not publish a release.
-- The old `nfs-release` daily patch automation is retired. Do not re-enable it or extend the old `nfs-sqlite-truncate-v*` patch-tag pipeline. Historical branches/tags/releases may remain for reference.
-- Report the Actions run URL and distinguish dispatch/build-in-progress from a successfully published release. Never report a release as successful before observing the workflow result.
+- Use the integrated upstream version for `X.Y.Z` and a new release revision for `N`. Published releases are immutable. Pushing branches or tags alone does not publish a release.
+- Provide the Actions run URL and current status without waiting for the long cloud build unless requested. Report publication success only after observing a successful result.
+- Keep the retired `nfs-release` scheduled patch workflow disabled. Historical branches, patch tags, and releases remain available for reference.
 
 # Rust/codex-rs
 
