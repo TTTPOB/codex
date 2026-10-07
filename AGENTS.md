@@ -1,3 +1,22 @@
+# Personal fork: daily-driver integration and releases
+
+- `TTTPOB/codex` uses `daily-driver` as the installed, integrated source branch and the fork's default branch. Feature/fix branches own their changes; integrate reviewed commits with `git cherry-pick -x`. Do not merge entire feature branches into daily-driver.
+- Maintain one personal release workflow: `.github/workflows/daily-driver-release.yml` on `daily-driver`. Do not copy or maintain personal release CI on every feature branch. Upstream workflows are not the personal release entry point.
+- Build the checked-out integrated commit directly. Never fetch the latest upstream release or apply a patch tag inside release CI. The release tag must point to the same commit used to build the binaries.
+- Upgrade upstream deliberately: fetch the selected `rust-vX.Y.Z` tag, adapt fixes on feature branches based on that tag, then integrate the upstream version into daily-driver and cherry-pick the adapted fixes. Resolve conflicts before publishing; do not reset or force-push the shared daily-driver branch or lose its existing integrations/workflow.
+- For the initial v0.160.1 integration, the NFS source branch is `fix/nfs-v0.160.1`. Preserve upstream SQLite initialization/locking behavior; use TRUNCATE on NFS and WAL on local filesystems, including musl builds.
+- Run focused tests for changed crates and the existing formatting command. Let the central release workflow perform the Linux musl build; do not duplicate full build matrices or add hypothetical safety machinery.
+- Commit workflow/process changes separately from feature fixes. Push the feature branch and daily-driver, then explicitly dispatch the central release workflow from daily-driver:
+
+  ```bash
+  gh workflow run daily-driver-release.yml -R TTTPOB/codex --ref daily-driver \
+    -f tag=daily-driver-vX.Y.Z-N
+  ```
+
+- Replace `X.Y.Z` with the integrated upstream version and `N` with a new release revision. Published releases are immutable: use a new revision for changed source, not asset clobbering. Merely pushing branches or tags does not publish a release.
+- The old `nfs-release` daily patch automation is retired. Do not re-enable it or extend the old `nfs-sqlite-truncate-v*` patch-tag pipeline. Historical branches/tags/releases may remain for reference.
+- Report the Actions run URL and distinguish dispatch/build-in-progress from a successfully published release. Never report a release as successful before observing the workflow result.
+
 # Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:

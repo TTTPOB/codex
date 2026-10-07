@@ -1,0 +1,120 @@
+name: Daily-driver release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (for example daily-driver-v0.160.1-1)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-driver-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'TTTPOB/codex' && github.ref == 'refs/heads/daily-driver'
+    name: Test, build and release integrated source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^daily-driver-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] || {
+            echo "Expected daily-driver-v<upstream-version>-<revision>" >&2
+            exit 1
+          }
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          df -h /
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install nextest
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+      - name: Test state crate
+        working-directory: codex-rs
+        run: cargo nextest run --no-fail-fast -p codex-state
+      - name: Remove host test artifacts
+        working-directory: codex-rs
+        run: rm -rf target
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+      - name: Install musl build tools
+        working-directory: codex-rs
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+      - name: Configure musl environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY_x86_64_unknown_linux_musl=1" >> "$GITHUB_ENV"
+      - name: Configure rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-musl
+      - name: Build musl binaries
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --quiet --target "$TARGET" --release --bin bwrap
+          bwrap_path="target/${TARGET}/release/bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap_path"
+          export CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          cargo build --quiet --target "$TARGET" --release --bin codex
+      - name: Package binaries
+        id: package
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_name="codex-${RELEASE_TAG}-${TARGET}.tar.gz"
+          archive="${RUNNER_TEMP}/${archive_name}"
+          tar -C "target/${TARGET}/release" -czf "$archive" codex bwrap
+          (cd "$RUNNER_TEMP" && sha256sum "$archive_name" > "${archive_name}.sha256")
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-daily-driver-x86_64-unknown-linux-musl
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          retention-days: 14
+          if-no-files-found: error
+      - name: Publish integrated source release
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" "$ARCHIVE" "${ARCHIVE}.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Codex ${RELEASE_TAG}" \
+            --notes "Built directly from daily-driver commit ${GITHUB_SHA}. Includes cherry-picked NFS SQLite support: TRUNCATE on NFS, WAL on local filesystems."
