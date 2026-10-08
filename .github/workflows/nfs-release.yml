@@ -1,6 +1,10 @@
 name: nfs-release
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/nfs-release.yml"
   workflow_dispatch:
     inputs:
       upstream_tag:
