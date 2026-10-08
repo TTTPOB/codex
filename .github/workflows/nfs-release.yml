@@ -30,7 +30,6 @@ jobs:
     outputs:
       upstream_tag: ${{ steps.release.outputs.upstream_tag }}
     env:
-      PATCH_TAG: nfs-sqlite-truncate-v4
       TARGET: x86_64-unknown-linux-musl
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
@@ -83,16 +82,94 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          patch_repo="${RUNNER_TEMP}/nfs-patch"
-          patch_file="${RUNNER_TEMP}/nfs.patch"
-          git clone --quiet --filter=blob:none --no-checkout --depth=2 --branch "$PATCH_TAG" \
-            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "$patch_repo"
-          git -C "$patch_repo" format-patch --stdout -1 "${PATCH_TAG}^{commit}" > "$patch_file"
           git fetch --force --depth=1 https://github.com/openai/codex.git "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
           git switch --detach "$UPSTREAM_TAG"
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git am "$patch_file"
+          python3 <<'PY'
+          from pathlib import Path
+
+          cargo = Path("codex-rs/state/Cargo.toml")
+          text = cargo.read_text()
+          dep = """[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+          libc = { workspace = true }
+
+          """
+          if "libc = { workspace = true }" not in text:
+              text = text.replace("[lints]\nworkspace = true\n", dep + "[lints]\nworkspace = true\n", 1)
+          cargo.write_text(text)
+
+          sqlite = Path("codex-rs/state/src/sqlite.rs")
+          text = sqlite.read_text()
+          if "use sqlx::sqlite::SqliteJournalMode;" not in text:
+              text = text.replace(
+                  "use sqlx::sqlite::SqliteConnectOptions;\n",
+                  "use sqlx::sqlite::SqliteConnectOptions;\nuse sqlx::sqlite::SqliteJournalMode;\n",
+                  1,
+              )
+
+          needle = "        let recovery = recover_spec.map_or(RecoveryMode::Unavailable, |spec| spec.recovery);\n"
+          replacement = needle + """        let journal_pragma = if journal_mode_for_path(path) == SqliteJournalMode::Truncate {
+                      "PRAGMA journal_mode = TRUNCATE"
+                  } else {
+                      "PRAGMA journal_mode = WAL"
+                  };
+          """
+          if needle not in text:
+              raise SystemExit("SQLite recovery hook changed upstream")
+          text = text.replace(needle, replacement, 1)
+
+          wal = '                            sqlx::query("PRAGMA journal_mode = WAL")\n'
+          if wal not in text:
+              raise SystemExit("SQLite WAL initialization changed upstream")
+          text = text.replace(wal, "                            sqlx::query(journal_pragma)\n", 1)
+
+          marker = '#[cfg(test)]\n#[path = "sqlite_tests.rs"]\nmod tests;\n'
+          helpers = r'''/// Use a rollback journal on NFS because SQLite WAL is unsafe on network filesystems.
+          fn journal_mode_for_path(path: &Path) -> SqliteJournalMode {
+              if path_is_on_nfs(path) {
+                  SqliteJournalMode::Truncate
+              } else {
+                  SqliteJournalMode::Wal
+              }
+          }
+
+          #[cfg(any(target_os = "linux", target_os = "macos"))]
+          fn path_is_on_nfs(path: &Path) -> bool {
+              use std::ffi::CString;
+              use std::os::unix::ffi::OsStrExt;
+
+              let target = path.parent().unwrap_or_else(|| Path::new("."));
+              let Ok(c_path) = CString::new(target.as_os_str().as_bytes()) else {
+                  return true;
+              };
+              let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+              if unsafe { libc::statfs(c_path.as_ptr(), &mut buf) } != 0 {
+                  return true;
+              }
+              is_nfs_statfs(&buf)
+          }
+
+          #[cfg(target_os = "linux")]
+          fn is_nfs_statfs(buf: &libc::statfs) -> bool {
+              buf.f_type as u64 == libc::NFS_SUPER_MAGIC as u64
+          }
+
+          #[cfg(target_os = "macos")]
+          fn is_nfs_statfs(buf: &libc::statfs) -> bool {
+              buf.f_fstypename.starts_with(&[b'n' as _, b'f' as _, b's' as _, 0])
+          }
+
+          #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+          fn path_is_on_nfs(_path: &Path) -> bool {
+              false
+          }
+
+          '''
+          if "fn journal_mode_for_path(" not in text:
+              if marker not in text:
+                  raise SystemExit("SQLite test-module marker changed upstream")
+              text = text.replace(marker, helpers + marker, 1)
+          sqlite.write_text(text)
+          PY
       - if: steps.existing.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
