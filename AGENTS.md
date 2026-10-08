@@ -1,31 +1,33 @@
-# Personal fork: daily-driver integration and releases
+# Personal fork: automatic NFS releases
 
-## Branches and integration
+## Maintaining fixes
 
-- `TTTPOB/codex` uses `daily-driver` as its default branch and the source for installed releases.
-- Develop feature and fix commits on dedicated branches, then integrate them with `git cherry-pick -x`. Commit workflow/process changes separately and integrate them the same way.
-- Upgrade upstream deliberately: fetch the selected `rust-vX.Y.Z` tag, adapt fixes on feature branches, integrate the upstream version into daily-driver, and cherry-pick the adapted fixes. Resolve conflicts before publishing and preserve existing integrations and the central workflow. Do not reset or force-push the shared daily-driver branch.
-- SQLite must use TRUNCATE on NFS and WAL on local filesystems, including musl builds. Preserve upstream initialization and locking behavior.
+- `daily-driver` is the stable default/control branch of `TTTPOB/codex`. It maintains the release workflow and `.github/nfs-patches`; it is not the upstream checkout used for each build.
+- Maintain fixes as normal commits on dedicated branches. If a CI cherry-pick fails, fetch the failing `rust-vX.Y.Z` tag, create `fix/vX.Y.Z-nfs` from that tag, adapt the fix, and push the branch. Replace the affected SHA in `.github/nfs-patches` on `daily-driver`.
+- CI starts from the selected upstream tag and cherry-picks listed commits in order with `-x`. A conflict stops the build; do not replace this with workflow-time text rewriting or silently skip a fix.
+- SQLite must use TRUNCATE on NFS and WAL locally, including musl builds. Preserve upstream initialization, recovery and locking behavior.
 
-## Local validation and cleanup
+## Validation and cleanup
 
 - Local `codex-state` tests are allowed: run `just test -p codex-state` from `codex-rs` when changing that crate. Local formatting and static checks are also allowed.
-- Build the complete Codex release, including Linux musl binaries, in GitHub Actions. Do not run full Codex builds or workspace-wide tests locally unless the user explicitly requests them. This scope overrides the broader upstream testing instructions below.
-- After work, remove task-generated local build artifacts (`codex-rs/target` and this checkout's Bazel build cache, if used) and temporary files. Preserve shared dependency download caches, unrelated project caches, and deliverables.
+- Full Codex release builds and workspace-wide tests belong in GitHub Actions, not local runs, unless explicitly requested. This scope overrides broader upstream testing instructions below.
+- Remove task-generated build artifacts and temporary files when finished. If Bazel was used, clear this checkout's build cache. Preserve shared dependency downloads, unrelated caches and deliverables.
 
-## Releases
+## Automatic releases and installation
 
-- Maintain one personal release workflow: `.github/workflows/daily-driver-release.yml` on `daily-driver`. It tests and builds the checked-out integrated source directly; the published tag must identify the built commit. Feature branches do not maintain separate personal release workflows.
-- Push the source branches and daily-driver, then explicitly dispatch:
+- Maintain only `.github/workflows/daily-driver-release.yml` as the personal CLI release workflow. It checks upstream daily, runs when its configuration changes, and supports manual dispatch. Do not revive the retired `main/nfs-release` workflow or add per-fix release workflows.
+- The runner integrates fixes temporarily, tests `codex-state`, and builds the Linux musl release. No integrated branch is pushed back, and no extra token secret is needed. The release tag points to the control commit, not the temporary integrated commit; no source bundle is required.
+- Publish `nfs-rust-vX.Y.Z` with `codex-nfs-rust-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz`. Skip versions already released. Fix failures and rerun; do not overwrite published releases.
+- Package the complete upstream CLI layout with `scripts/build_codex_package.py`, including metadata, `bin/codex`, `bin/codex-code-mode-host`, `codex-path` and `codex-resources`. Preserve existing runner disk cleanup and musl/V8 build setup.
+- The updater in `TTTPOB/codex-vscode-env-patch` must select these releases and install the entire package, not standalone binaries. Keep its independent DEBUG-patched VSIX publishing workflow.
+- Push the fix branch before the control/configuration commit. To dispatch explicitly:
 
   ```bash
-  gh workflow run daily-driver-release.yml -R TTTPOB/codex --ref daily-driver \
-    -f tag=daily-driver-vX.Y.Z-N
+  gh workflow run daily-driver-release.yml -R TTTPOB/codex --ref daily-driver
+  # Optional: -f upstream_tag=rust-vX.Y.Z
   ```
 
-- Use the integrated upstream version for `X.Y.Z` and a new release revision for `N`. Published releases are immutable. Pushing branches or tags alone does not publish a release.
-- Provide the Actions run URL and current status without waiting for the long cloud build unless requested. Report publication success only after observing a successful result.
-- Keep the retired `nfs-release` scheduled patch workflow disabled. Historical branches, patch tags, and releases remain available for reference.
+- Provide the Actions URL and observed status without waiting for the long build unless requested. Claim publication success only after observing it.
 
 # Rust/codex-rs
 

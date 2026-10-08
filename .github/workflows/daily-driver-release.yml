@@ -1,24 +1,72 @@
-name: Daily-driver release
+name: Automatic NFS release
 
 on:
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
-      tag:
-        description: Release tag (for example daily-driver-v0.160.1-1)
-        required: true
+      upstream_tag:
+        description: Upstream tag (rust-vX.Y.Z), or blank for latest stable release
+        required: false
         type: string
+  push:
+    branches: [daily-driver]
+    paths:
+      - .github/nfs-patches
+      - .github/scripts/integrate-nfs.sh
+      - .github/workflows/daily-driver-release.yml
 
 permissions:
   contents: write
 
 concurrency:
-  group: daily-driver-release
+  group: automatic-nfs-release
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    if: github.repository == 'TTTPOB/codex'
+    runs-on: ubuntu-24.04
+    outputs:
+      upstream_tag: ${{ steps.release.outputs.upstream_tag }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      build: ${{ steps.release.outputs.build }}
+    steps:
+      - name: Resolve upstream and skip published versions
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          upstream_tag="$REQUESTED_TAG"
+          if [[ -z "$upstream_tag" ]]; then
+            upstream_tag="$(gh api repos/openai/codex/releases/latest --jq .tag_name)"
+          fi
+          [[ "$upstream_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Expected a stable rust-vX.Y.Z tag, got $upstream_tag" >&2
+            exit 1
+          }
+          release_tag="nfs-$upstream_tag"
+          status="$(curl -sS -o "$RUNNER_TEMP/release.json" -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$release_tag")"
+          case "$status" in
+            404) build=true ;;
+            200) build=false; echo "$release_tag already exists; skipping." ;;
+            *) echo "Release lookup failed: HTTP $status" >&2; exit 1 ;;
+          esac
+          {
+            echo "upstream_tag=$upstream_tag"
+            echo "release_tag=$release_tag"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+
   release:
-    if: github.repository == 'TTTPOB/codex' && github.ref == 'refs/heads/daily-driver'
-    name: Test, build and release integrated source
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    name: Cherry-pick, test, build and release
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -27,18 +75,15 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       CARGO_PROFILE_RELEASE_STRIP: symbols
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ inputs.tag }}
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Validate release tag
+      - name: Integrate NFS fix commits
         shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^daily-driver-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] || {
-            echo "Expected daily-driver-v<upstream-version>-<revision>" >&2
-            exit 1
-          }
+        run: bash .github/scripts/integrate-nfs.sh "$UPSTREAM_TAG" "$RUNNER_TEMP/nfs-source"
       - name: Free runner disk space
         shell: bash
         run: |
@@ -70,7 +115,6 @@ jobs:
       - name: Configure musl environment
         shell: bash
         run: |
-          set -euo pipefail
           echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
           echo "AWS_LC_SYS_NO_JITTER_ENTROPY_x86_64_unknown_linux_musl=1" >> "$GITHUB_ENV"
       - name: Configure rusty_v8 artifacts
@@ -87,7 +131,7 @@ jobs:
           strip --strip-debug --strip-unneeded "$bwrap_path"
           export CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
           cargo build --quiet --target "$TARGET" --release --bin codex --bin codex-code-mode-host
-      - name: Package binaries
+      - name: Package complete CLI runtime
         id: package
         working-directory: codex-rs
         shell: bash
@@ -95,35 +139,32 @@ jobs:
           set -euo pipefail
           archive_name="codex-${RELEASE_TAG}-${TARGET}.tar.gz"
           archive="${RUNNER_TEMP}/${archive_name}"
-          package_dir="${RUNNER_TEMP}/codex-package-${TARGET}"
           python3 "${GITHUB_WORKSPACE}/scripts/build_codex_package.py" \
-            --target "$TARGET" \
-            --variant codex \
+            --target "$TARGET" --variant codex \
             --entrypoint-bin "target/${TARGET}/release/codex" \
             --code-mode-host-bin "target/${TARGET}/release/codex-code-mode-host" \
             --bwrap-bin "target/${TARGET}/release/bwrap" \
-            --package-dir "$package_dir" \
-            --archive-output "$archive" \
-            --force
+            --package-dir "$RUNNER_TEMP/codex-package" \
+            --archive-output "$archive"
           (cd "$RUNNER_TEMP" && sha256sum "$archive_name" > "${archive_name}.sha256")
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
       - name: Upload Actions artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: codex-daily-driver-x86_64-unknown-linux-musl
+          name: codex-nfs-x86_64-unknown-linux-musl
           path: |
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.archive }}.sha256
           retention-days: 14
           if-no-files-found: error
-      - name: Publish integrated source release
+      - name: Publish release
         shell: bash
         env:
           ARCHIVE: ${{ steps.package.outputs.archive }}
         run: |
           set -euo pipefail
+          # Tag the control commit: GITHUB_TOKEN cannot push upstream workflow changes.
           gh release create "$RELEASE_TAG" "$ARCHIVE" "${ARCHIVE}.sha256" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "Codex ${RELEASE_TAG}" \
-            --notes "Built directly from daily-driver commit ${GITHUB_SHA}. Includes cherry-picked NFS SQLite support: TRUNCATE on NFS, WAL on local filesystems."
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Codex ${UPSTREAM_TAG} with SQLite NFS fix" \
+            --notes "Based on openai/codex ${UPSTREAM_TAG}, with maintained NFS fix commits cherry-picked before building. Uses TRUNCATE on NFS and WAL locally. Includes the complete CLI runtime package."
