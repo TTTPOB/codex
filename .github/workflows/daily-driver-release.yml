@@ -86,7 +86,7 @@ jobs:
           bwrap_path="target/${TARGET}/release/bwrap"
           strip --strip-debug --strip-unneeded "$bwrap_path"
           export CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
-          cargo build --quiet --target "$TARGET" --release --bin codex
+          cargo build --quiet --target "$TARGET" --release --bin codex --bin codex-code-mode-host
       - name: Package binaries
         id: package
         working-directory: codex-rs
@@ -95,7 +95,16 @@ jobs:
           set -euo pipefail
           archive_name="codex-${RELEASE_TAG}-${TARGET}.tar.gz"
           archive="${RUNNER_TEMP}/${archive_name}"
-          tar -C "target/${TARGET}/release" -czf "$archive" codex bwrap
+          package_dir="${RUNNER_TEMP}/codex-package-${TARGET}"
+          python3 "${GITHUB_WORKSPACE}/scripts/build_codex_package.py" \
+            --target "$TARGET" \
+            --variant codex \
+            --entrypoint-bin "target/${TARGET}/release/codex" \
+            --code-mode-host-bin "target/${TARGET}/release/codex-code-mode-host" \
+            --bwrap-bin "target/${TARGET}/release/bwrap" \
+            --package-dir "$package_dir" \
+            --archive-output "$archive" \
+            --force
           (cd "$RUNNER_TEMP" && sha256sum "$archive_name" > "${archive_name}.sha256")
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
       - name: Upload Actions artifact
