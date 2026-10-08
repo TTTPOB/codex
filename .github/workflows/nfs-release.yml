@@ -143,7 +143,7 @@ jobs:
           strip --strip-debug --strip-unneeded "$bwrap_path"
           digest="$(sha256sum "$bwrap_path" | awk '{print $1}')"
           export CODEX_BWRAP_SHA256="$digest"
-          cargo build --quiet --target "$TARGET" --release --bin codex
+          cargo build --quiet --target "$TARGET" --release --bin codex --bin codex-code-mode-host
       - if: steps.existing.outputs.skip != 'true'
         name: Package binaries
         id: package
@@ -152,7 +152,16 @@ jobs:
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/codex-${RELEASE_TAG}-x86_64-unknown-linux-musl.tar.gz"
-          tar -C "target/${TARGET}/release" -czf "$archive" codex bwrap
+          package_dir="${RUNNER_TEMP}/codex-package-${TARGET}"
+          python3 "${GITHUB_WORKSPACE}/scripts/build_codex_package.py" \
+            --target "$TARGET" \
+            --variant codex \
+            --entrypoint-bin "target/${TARGET}/release/codex" \
+            --code-mode-host-bin "target/${TARGET}/release/codex-code-mode-host" \
+            --bwrap-bin "target/${TARGET}/release/bwrap" \
+            --package-dir "$package_dir" \
+            --archive-output "$archive" \
+            --force
           sha256sum "$archive" > "${archive}.sha256"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
       - if: steps.existing.outputs.skip != 'true'
