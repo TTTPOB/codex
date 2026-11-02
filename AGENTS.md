@@ -1,33 +1,16 @@
-# Personal fork: automatic NFS releases
+# Personal fork: NFS releases retired
 
-## Maintaining fixes
-
-- `daily-driver` is the stable default/control branch of `TTTPOB/codex`. It maintains the release workflow and `.github/nfs-patches`; it is not the upstream checkout used for each build.
-- Maintain fixes as normal commits on dedicated branches. If a CI cherry-pick fails, fetch the failing `rust-vX.Y.Z` tag, create `fix/vX.Y.Z-nfs` from that tag, adapt the fix, and push the branch. Replace the affected SHA in `.github/nfs-patches` on `daily-driver`.
-- CI starts from the selected upstream tag and cherry-picks listed commits in order with `-x`. A conflict stops the build; do not replace this with workflow-time text rewriting or silently skip a fix.
-- SQLite must use TRUNCATE on NFS and WAL locally, including musl builds. Preserve upstream initialization, recovery and locking behavior.
+- Personal NFS CLI releases are retired. Use official stable releases from `openai/codex`; do not revive the personal release workflows or maintain new NFS cherry-picks.
+- Upstream `rust-v0.166.0` includes NFS detection and DELETE journaling for new NFS databases. Existing databases retain their journal mode by default; switching binaries does not automatically migrate existing WAL databases.
+- `daily-driver` remains the historical control branch. Keep existing releases and fix commits available for reference; `.github/nfs-patches` and `.github/scripts/integrate-nfs.sh` are historical, not an active release pipeline.
+- The updater in `TTTPOB/codex-vscode-env-patch` installs complete official CLI runtime packages. Keep its independent DEBUG-patched VSIX publishing workflow.
 
 ## Validation and cleanup
 
 - Local `codex-state` tests are allowed: run `just test -p codex-state` from `codex-rs` when changing that crate. Local formatting and static checks are also allowed.
-- Full Codex release builds and workspace-wide tests belong in GitHub Actions, not local runs, unless explicitly requested. This scope overrides broader upstream testing instructions below.
-- Remove task-generated build artifacts and temporary files when finished. If Bazel was used, clear this checkout's build cache. Preserve shared dependency downloads, unrelated caches and deliverables.
+- Do not run full Codex release builds or workspace-wide tests locally unless explicitly requested. This scope overrides broader upstream testing instructions below.
+- Remove task-generated build artifacts and temporary files when finished. Preserve shared dependency downloads, unrelated caches and deliverables.
 
-## Automatic releases and installation
-
-- Maintain only `.github/workflows/daily-driver-release.yml` as the personal CLI release workflow. It checks upstream daily, runs when its configuration changes, and supports manual dispatch. Do not revive the retired `main/nfs-release` workflow or add per-fix release workflows.
-- The runner integrates fixes temporarily, tests `codex-state`, and builds the Linux musl release. No integrated branch is pushed back, and no extra token secret is needed. The release tag points to the control commit, not the temporary integrated commit; no source bundle is required.
-- Publish `nfs-rust-vX.Y.Z` with `codex-nfs-rust-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz`. Skip versions already released. Fix failures and rerun; do not overwrite published releases.
-- Package the complete upstream CLI layout with `scripts/build_codex_package.py`, including metadata, `bin/codex`, `bin/codex-code-mode-host`, `codex-path` and `codex-resources`. Preserve existing runner disk cleanup and musl/V8 build setup.
-- The updater in `TTTPOB/codex-vscode-env-patch` must select these releases and install the entire package, not standalone binaries. Keep its independent DEBUG-patched VSIX publishing workflow.
-- Push the fix branch before the control/configuration commit. To dispatch explicitly:
-
-  ```bash
-  gh workflow run daily-driver-release.yml -R TTTPOB/codex --ref daily-driver
-  # Optional: -f upstream_tag=rust-vX.Y.Z
-  ```
-
-- Provide the Actions URL and observed status without waiting for the long build unless requested. Claim publication success only after observing it.
 
 # Rust/codex-rs
 
